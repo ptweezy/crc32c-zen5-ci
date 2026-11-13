@@ -48,6 +48,16 @@ typedef uint32_t (*mixed_fn)(uint32_t crc, const uint8_t *p, size_t len,
 static inline __attribute__((always_inline)) uint32_t
 crc32c_mixed_glue(mixed_fn fn, uint32_t crc, const uint8_t *p, size_t len)
 {
+	/* The first len % 8 bytes, without branching on how many there are. */
+	if (len % 8) {
+		const unsigned int bits = 8 * (len % 8);
+		uint64_t head = (crc ^ crc32c_ld64(p)) << (64 - bits);
+
+		crc = (uint32_t)(((uint64_t)crc >> bits) ^ _mm_crc32_u64(0, head));
+		p += len % 8;
+		len -= len % 8;
+	}
+
 	do {
 		size_t n = len;
 
@@ -67,13 +77,8 @@ crc32c_mixed_glue(mixed_fn fn, uint32_t crc, const uint8_t *p, size_t len)
 static inline __attribute__((always_inline)) uint32_t
 kernel_mixed_with(mixed_fn fn, uint32_t crc, const uint8_t *p, size_t len)
 {
-	if (len >= 512) {
-		size_t n = len & ~(size_t)7;
-
-		crc = crc32c_mixed_glue(fn, crc, p, n);
-		p += n;
-		len -= n;
-	}
+	if (len >= 512)
+		return crc32c_mixed_glue(fn, crc, p, len);
 	return crc32c_one_chain(crc, p, len);
 }
 

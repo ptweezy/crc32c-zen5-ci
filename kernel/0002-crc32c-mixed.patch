@@ -12,7 +12,7 @@ index 386e9c175263..d2fee2ced133 100644
  
  obj-$(CONFIG_CRC64) += crc64.o
 diff --git a/lib/crc/x86/crc32.h b/lib/crc/x86/crc32.h
-index fb07ed449ae4..89e416f340f2 100644
+index fb07ed449ae4..8648e16b14b2 100644
 --- a/lib/crc/x86/crc32.h
 +++ b/lib/crc/x86/crc32.h
 @@ -8,10 +8,12 @@
@@ -28,7 +28,7 @@ index fb07ed449ae4..89e416f340f2 100644
  
  DECLARE_CRC_PCLMUL_FUNCS(crc32_lsb, u32);
  
-@@ -35,6 +37,34 @@ static inline u32 crc32_le_arch(u32 crc, const u8 *p, size_t len)
+@@ -35,6 +37,58 @@ static inline u32 crc32_le_arch(u32 crc, const u8 *p, size_t len)
  #define CRC32C_PCLMUL_BREAKEVEN	512
  
  asmlinkage u32 crc32c_x86_3way(u32 crc, const u8 *buffer, size_t len);
@@ -39,11 +39,35 @@ index fb07ed449ae4..89e416f340f2 100644
 +#define CRC32C_MIXED_MAX_LEN	4096
 +
 +/*
-+ * Checksum a whole number of qwords, at least CRC32C_PCLMUL_BREAKEVEN bytes,
-+ * using crc32c_mixed_avx512().
++ * Checksum at least CRC32C_PCLMUL_BREAKEVEN bytes using crc32c_mixed_avx512().
++ *
++ * This is deliberately not inlined into crc32c_arch().  The loop needs several
++ * values kept across calls, and letting the compiler find room for them there
++ * made the code it generates for the other implementations worse.
 + */
-+static inline u32 crc32c_mixed(u32 crc, const u8 *p, size_t len)
++static noinline u32 crc32c_mixed(u32 crc, const u8 *p, size_t len)
 +{
++	/*
++	 * crc32c_mixed_avx512() takes whole qwords, so do the first len % 8
++	 * bytes here.  Handle all seven cases with the same code, since
++	 * branching on which one it is gets mispredicted when the caller's
++	 * lengths vary.  Updating a CRC with k bytes shifts it right by 8*k
++	 * bits and XORs in the CRC, from zero, of those bytes XORed with the
++	 * bits that got shifted out.  A single crc32q computes the latter if
++	 * the bytes are moved to the end of a qword, since the zero bytes
++	 * ahead of them leave a zero CRC unchanged.
++	 */
++	if (len % 8) {
++		const unsigned int bits = 8 * (len % 8);
++		unsigned long head = (crc ^ *(const unsigned long *)p) << (64 - bits);
++		u32 head_crc = 0;
++
++		asm(CRC32_INST : "+r" (head_crc) : ASM_INPUT_RM (head));
++		crc = ((u64)crc >> bits) ^ head_crc;
++		p += len % 8;
++		len -= len % 8;
++	}
++
 +	do {
 +		size_t n = len;
 +
@@ -63,16 +87,7 @@ index fb07ed449ae4..89e416f340f2 100644
  
  static inline u32 crc32c_arch(u32 crc, const u8 *p, size_t len)
  {
-@@ -45,6 +75,8 @@ static inline u32 crc32c_arch(u32 crc, const u8 *p, size_t len)
- 
- 	if (IS_ENABLED(CONFIG_X86_64) && len >= CRC32C_PCLMUL_BREAKEVEN &&
- 	    static_branch_likely(&have_pclmulqdq) && likely(irq_fpu_usable())) {
-+		size_t n = len;
-+
- 		/*
- 		 * Long length, the vector registers are usable, and the CPU is
- 		 * 64-bit and supports both CRC32 and PCLMULQDQ instructions.
-@@ -58,31 +90,39 @@ static inline u32 crc32c_arch(u32 crc, const u8 *p, size_t len)
+@@ -58,17 +112,21 @@ static inline u32 crc32c_arch(u32 crc, const u8 *p, size_t len)
  		 * crc32c_x86_3way() when the CPU supports VPCLMULQDQ and has a
  		 * "good" implementation of AVX-512.
  		 *
@@ -86,8 +101,7 @@ index fb07ed449ae4..89e416f340f2 100644
 -		 * is needed anyway for crc32_le(), so we just reuse it here.
 +		 * The optimal strategy on Zen 3--5 is actually to use both
 +		 * crc32q and VPCLMULQDQ in parallel.  crc32c_mixed() does that
-+		 * with the numbers of streams that are best on Zen 5, and it
-+		 * leaves the last 0-7 bytes for the code below.
++		 * with the numbers of streams that are best on Zen 5.
 +		 *
 +		 * Future work: different numbers of streams and vector lengths
 +		 * are optimal on each CPU microarchitecture, so Zen 3 and Zen 4
@@ -98,37 +112,13 @@ index fb07ed449ae4..89e416f340f2 100644
  		 */
  		kernel_fpu_begin_mask(0);
 -		if (static_branch_likely(&have_vpclmul_avx512))
-+		if (static_branch_unlikely(&have_crc32c_mixed)) {
-+			n = round_down(len, 8);
-+			crc = crc32c_mixed(crc, p, n);
-+		} else if (static_branch_likely(&have_vpclmul_avx512)) {
++		if (static_branch_unlikely(&have_crc32c_mixed))
++			crc = crc32c_mixed(crc, p, len);
++		else if (static_branch_likely(&have_vpclmul_avx512))
  			crc = crc32_lsb_vpclmul_avx512(crc, p, len,
  				       crc32_lsb_0x82f63b78_consts.fold_across_128_bits_consts);
--		else
-+		} else {
- 			crc = crc32c_x86_3way(crc, p, len);
-+		}
- 		kernel_fpu_end();
--		return crc;
-+		p += n;
-+		len -= n;
- 	}
- 
- 	/*
--	 * Short length, XMM registers unusable, or the CPU is 32-bit; but the
--	 * CPU supports CRC32 instructions.  Just issue a single stream of CRC32
--	 * instructions inline.  While this doesn't use the CPU's CRC32
--	 * throughput very well, it avoids the need to combine streams.  Stream
--	 * combination would be inefficient here.
-+	 * Short length, XMM registers unusable, the CPU is 32-bit, or only the
-+	 * end of the data is left; but the CPU supports CRC32 instructions.
-+	 * Just issue a single stream of CRC32 instructions inline.  While this
-+	 * doesn't use the CPU's CRC32 throughput very well, it avoids the need
-+	 * to combine streams.  Stream combination would be inefficient here.
- 	 */
- 
- 	for (num_longs = len / sizeof(unsigned long);
-@@ -117,6 +157,8 @@ static void crc32_mod_init_arch(void)
+ 		else
+@@ -117,6 +175,8 @@ static void crc32_mod_init_arch(void)
  				static_call_update(crc32_lsb_pclmul,
  						   crc32_lsb_vpclmul_avx512);
  				static_branch_enable(&have_vpclmul_avx512);

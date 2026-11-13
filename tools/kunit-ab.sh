@@ -31,8 +31,11 @@ summarise() {
 echo "A = $A"
 echo "B = $B"
 echo "boots each: $boots, cmdline: $cmdline"
-printf '%-10s %6s  %9s %9s  %9s %9s  %7s\n' variant len A-median A-max B-median B-max 'B/A med'
+# Each length is timed for well under a millisecond per boot, so a single
+# interruption ruins a sample.  The best of several boots is the estimate of
+# what the code can do; the medians show how noisy the boots were.
+printf '%-10s %6s  %9s %9s %7s   %9s %9s\n' variant len A-best B-best change A-median B-median
 join -j1 <(summarise A | awk '{print $1"/"$2, $3, $4}' | sort) \
          <(summarise B | awk '{print $1"/"$2, $3, $4}' | sort) \
   | tr '/' ' ' | sort -k1,1 -k2,2n \
-  | awk '{ printf "%-10s %6d  %9d %9d  %9d %9d  %6.1f%%\n", $1, $2, $3, $4, $5, $6, 100.0 * $5 / $3 - 100 }'
+  | awk '{ printf "%-10s %6d  %9d %9d %+6.1f%%   %9d %9d\n", $1, $2, $4, $6, 100.0 * $6 / $4 - 100, $3, $5 }'

@@ -42,9 +42,11 @@ print(f'lengths {MIN_LEN}..{MAX_LEN}: largest m = {max_m}, largest q = {max_q}, 
       f'largest multiplier index = {max_index} (table has 0..{TOP})')
 print(f'rounds before the main loop: {min(pre_rounds)}..{max(pre_rounds)}')
 
-# The C glue's splitting of longer lengths: every piece is a legal length.
+# The C glue takes len % 8 bytes off the front, then splits what is left:
+# every piece is a legal length.
 def pieces(length):
     out = []
+    length -= length % 8
     while length:
         n = length
         if n > MAX_LEN:
@@ -54,9 +56,9 @@ def pieces(length):
     return out
 
 worst = MAX_LEN
-for length in range(MIN_LEN, 300000, 8):
+for length in range(MIN_LEN, 300000):
     ps = pieces(length)
-    assert sum(ps) == length
+    assert sum(ps) == length - length % 8
     assert all(MIN_LEN <= p <= MAX_LEN and p % 8 == 0 for p in ps), (length, ps)
     assert all(p % 64 == 0 for p in ps[:-1]), (length, ps)
     worst = min(worst, min(ps))
