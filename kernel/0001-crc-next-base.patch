@@ -1,0 +1,80 @@
+From f7d80cca846cae3094396a8e93f74f42f41df50b Mon Sep 17 00:00:00 2001
+From: Eric Biggers <ebiggers@kernel.org>
+Date: Wed, 4 Nov 2026 16:55:21 -0800
+Subject: [PATCH] lib/crc: x86: Opt out of initializing MXCSR and 387 state
+
+The CRC code using "kernel-mode FPU" is integer code that does not use
+any MMX or x87 instructions.  To the extent that float-domain
+instructions are used at all, they are only moves and shuffles, neither
+of which raises SIMD floating-point exceptions or depends on MXCSR.
+
+Therefore, there's no need to initialize MXCSR or the 387 FPU state.
+
+Opt out of this initialization by using kernel_fpu_begin_mask(0) instead
+of kernel_fpu_begin().  This eliminates an 'ldmxcsr' instruction in
+every kernel-mode FPU section, reducing overhead, which matters most for
+short input lengths.  On 32-bit kernels it also eliminates 'fninit'.
+
+A precedent for this optimization can be found in
+commit a58db7ad80e8 ("netfilter: nft_set_pipapo_avx2: Skip LDMXCSR, we
+don't need a valid MXCSR state").
+
+Link: https://patch.msgid.link/20261105005523.84925-2-ebiggers@kernel.org
+Signed-off-by: Eric Biggers <ebiggers@kernel.org>
+---
+ lib/crc/x86/crc-pclmul-template.h | 18 +++++++++---------
+ lib/crc/x86/crc32.h               |  2 +-
+ 2 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/lib/crc/x86/crc-pclmul-template.h b/lib/crc/x86/crc-pclmul-template.h
+index 893119bb7c07..124946f441a9 100644
+--- a/lib/crc/x86/crc-pclmul-template.h
++++ b/lib/crc/x86/crc-pclmul-template.h
+@@ -42,14 +42,14 @@ static inline bool have_avx512(void)
+  * bytes, the CPU has PCLMULQDQ support, and the current context may use SIMD.
+  *
+  * 16 bytes is the minimum length supported by the [V]PCLMULQDQ functions.
+- * There is overhead associated with kernel_fpu_begin() and kernel_fpu_end(),
+- * varying by CPU and factors such as which parts of the "FPU" state userspace
+- * has touched, which could result in a larger cutoff being better.  Indeed, a
+- * larger cutoff is usually better for a *single* message.  However, the
+- * overhead of the FPU section gets amortized if multiple FPU sections get
+- * executed before returning to userspace, since the XSAVE and XRSTOR occur only
+- * once.  Considering that and the fact that the [V]PCLMULQDQ code is lighter on
+- * the dcache than the table-based code is, a 16-byte cutoff seems to work well.
++ * There is overhead associated with the kernel-mode "FPU" section, varying by
++ * CPU and factors such as which parts of the "FPU" state userspace has touched,
++ * which could result in a larger cutoff being better.  Indeed, a larger cutoff
++ * is usually better for a *single* message.  However, the overhead of the FPU
++ * section gets amortized if multiple FPU sections get executed before returning
++ * to userspace, since the XSAVE and XRSTOR occur only once.  Considering that
++ * and the fact that the [V]PCLMULQDQ code is lighter on the dcache than the
++ * table-based code is, a 16-byte cutoff seems to work well.
+  */
+ #define CRC_PCLMUL(crc, p, len, prefix, consts, have_pclmulqdq)		\
+ do {									\
+@@ -58,7 +58,7 @@ do {									\
+ 		const void *consts_ptr;					\
+ 									\
+ 		consts_ptr = (consts).fold_across_128_bits_consts;	\
+-		kernel_fpu_begin();					\
++		kernel_fpu_begin_mask(0);				\
+ 		crc = static_call(prefix##_pclmul)((crc), (p), (len),	\
+ 						   consts_ptr);		\
+ 		kernel_fpu_end();					\
+diff --git a/lib/crc/x86/crc32.h b/lib/crc/x86/crc32.h
+index 19a5e3c6c73b..fb07ed449ae4 100644
+--- a/lib/crc/x86/crc32.h
++++ b/lib/crc/x86/crc32.h
+@@ -67,7 +67,7 @@ static inline u32 crc32c_arch(u32 crc, const u8 *p, size_t len)
+ 		 * crc32c_x86_3way() and crc32_lsb_vpclmul_avx512().  The latter
+ 		 * is needed anyway for crc32_le(), so we just reuse it here.
+ 		 */
+-		kernel_fpu_begin();
++		kernel_fpu_begin_mask(0);
+ 		if (static_branch_likely(&have_vpclmul_avx512))
+ 			crc = crc32_lsb_vpclmul_avx512(crc, p, len,
+ 				       crc32_lsb_0x82f63b78_consts.fold_across_128_bits_consts);
+-- 
+2.43.0
+

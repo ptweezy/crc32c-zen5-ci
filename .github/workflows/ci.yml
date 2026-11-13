@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.cc }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc-9, gcc-10, gcc-11, gcc-12, gcc-13, gcc-14,
+             clang-15, clang-16, clang-17, clang-18, clang-19]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q "$CC" flex bison bc libelf-dev libssl-dev
+
+      - name: Machine
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          echo "cpus: $(nproc)"
+          "$CC" --version | head -1
+          as --version | head -1
+          for f in sse4_2 pclmulqdq avx2 vpclmulqdq avx512bw avx512vl; do
+            grep -qw "$f" /proc/cpuinfo && echo "$f: yes" || echo "$f: no"
+          done
+
+      - name: Fetch kernel and apply patches
+        run: |
+          git clone -q --depth 1 --branch v7.4-rc2 https://github.com/torvalds/linux.git linux
+          cd linux
+          for p in ../kernel/*.patch; do
+            echo "applying $p"
+            git apply "$p"
+          done
+          git status --short
+
+      - name: Kernel lib/crc, x86_64, W=1
+        run: |
+          cd linux
+          make CC="$CC" O=../b64 defconfig > /dev/null
+          grep -E '^CONFIG_(CRC32|CRC32_ARCH|WERROR|CC_VERSION_TEXT|AS_IS_LLVM|AS_IS_GNU)=' ../b64/.config
+          set -o pipefail
+          make CC="$CC" O=../b64 -j"$(nproc)" W=1 lib/crc/ 2>&1 | tee ../b64.log
+          test -f ../b64/lib/crc/x86/crc32c-mixed.o
+          if grep -E 'warning' ../b64.log | grep -E 'lib/crc'; then
+            echo "::error::warnings in lib/crc"; exit 1
+          fi
+
+      - name: Kernel lib/crc, i386, W=1
+        run: |
+          cd linux
+          make ARCH=i386 CC="$CC" O=../b32 defconfig > /dev/null
+          set -o pipefail
+          make ARCH=i386 CC="$CC" O=../b32 -j"$(nproc)" W=1 lib/crc/ 2>&1 | tee ../b32.log
+          test -f ../b32/lib/crc/crc32-main.o
+          test ! -e ../b32/lib/crc/x86/crc32c-mixed.o
+          if nm -u ../b32/lib/crc/crc32-main.o | grep -E 'crc32c_mixed|crc32c_x86_3way'; then
+            echo "::error::dangling reference to a 64-bit-only routine"; exit 1
+          fi
+          if grep -E 'warning' ../b32.log | grep -E 'lib/crc'; then
+            echo "::error::warnings in lib/crc"; exit 1
+          fi
+
+      - name: Userspace test and benchmark
+        run: |
+          if ! grep -qw avx512bw /proc/cpuinfo || ! grep -qw avx512vl /proc/cpuinfo ||
+             ! grep -qw vpclmulqdq /proc/cpuinfo; then
+            echo "::notice::$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) lacks AVX-512 or VPCLMULQDQ: userspace run skipped"
+            exit 0
+          fi
+          make KDIR="$PWD/linux" CC="$CC"
+          python3 tools/verify-layout.py
+          ./test 20000 | grep -E 'k-|references|all tests|SOME|FAIL'
+          echo "::notice::userspace tests ran on$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) with $CC"
+          F="-f k-3way -f k-today -f k-mixed"
+          ./bench $F -l 512 -l 1024 -l 2048 -l 4096 -l 16384
+          ./bench -i $F -l 512 -l 1024 -l 2048 -l 4096 -l 16384
+          ./bench $F -r 512,4096,8 -r 3584,4096,8
+          ./bench -i $F -r 512,4096,8 -r 3584,4096,8
