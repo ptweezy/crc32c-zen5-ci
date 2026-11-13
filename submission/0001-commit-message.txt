@@ -1,0 +1,23 @@
+scripts/gen-crc-consts: Add multiplier table for mixed CRC32C
+
+Add a new type of constants, x86_crc32c_mixed, for an upcoming x86 CRC32C
+implementation that uses the crc32q and VPCLMULQDQ instructions together.
+
+That code divides its input between VPCLMULQDQ folding and several crc32q
+streams, and at the end it has to move every intermediate result to the
+end of the data: each one gets carrylessly multiplied by a power of x that
+depends on how much data follows it.  With the layout that code uses, all
+of those distances are whole numbers of qwords, so a single table of
+
+	M(d) = x^(64*d + 31) mod G
+
+for d = 0 through 255 provides every multiplier it needs, including the
+ones for the folding itself.
+
+The table is 256 32-bit entries, 1 KiB, the same size as the table that
+crc32c-3way.S has.  It's emitted in descending order of d, so that the
+multipliers for consecutive 128-bit lanes of a vector register are
+adjacent and already in lane order, which lets the assembly load the
+eight it needs for one zmm register with a single vpmovzxdq.
+
+The output of the existing constants types is unchanged.

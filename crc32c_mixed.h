@@ -132,8 +132,10 @@ crc32c_mixed_chunk(uint32_t crc, const uint8_t *p, size_t len,
 #pragma GCC unroll 8
 		for (int j = 0; j < K; j++)
 			acc[j] = _mm512_loadu_si512(vp + 64 * j);
+		/* (_mm512_zextsi128_si512() would do, but gcc 9 lacks it.) */
 		acc[0] = _mm512_xor_si512(acc[0],
-			_mm512_zextsi128_si512(_mm_cvtsi32_si128((int)crc)));
+			_mm512_inserti32x4(_mm512_setzero_si512(),
+					   _mm_cvtsi32_si128((int)crc), 0));
 		vp += 64 * (size_t)K;
 	} else {
 		c[0] = crc;
