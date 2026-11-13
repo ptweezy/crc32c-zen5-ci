@@ -1,3 +1,5 @@
 *.o
 /test
 /bench
+/linux/
+/submission/

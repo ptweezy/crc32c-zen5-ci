@@ -1,129 +1,116 @@
-# Mixed crc32q + VPCLMULQDQ CRC32C for Zen 5 — userspace prototype
+# Mixed crc32q + VPCLMULQDQ CRC32C for Zen 5
 
-A design experiment for the "future work" noted in the kernel's
-`lib/crc/x86/crc32.h`: on AMD Zen 3–5 the fastest CRC32C runs `crc32q` chains
-and VPCLMULQDQ folding at the same time. This prototype measures how much that
-buys on a Ryzen 7 9800X3D (Zen 5) and which shape of it works best.
+Work toward a Linux kernel patch for the "future work" noted in
+`lib/crc/x86/crc32.h`: on AMD Zen CPUs the fastest CRC32C runs `crc32q`
+chains and VPCLMULQDQ folding at the same time.
 
-It is not kernel code. It uses compiler intrinsics and builds its constants at
-startup. Its job is to produce numbers and a design before any kernel assembly
-is written.
+This repository holds the userspace prototype that chose the design, and a
+harness that tests and benchmarks the kernel's own assembly files unmodified.
+The kernel changes are in `kernel/0002-crc32c-mixed.patch`, which applies on
+top of the `crc-next` commit in `kernel/0001-crc-next-base.patch`, itself on
+top of v7.4-rc2.
 
-## Result
+## Where things stand
 
-Throughput in GB/s, chained calls (the method `crc_kunit` uses), 64-byte
-aligned buffer, gcc 13.3, measured 2026-11-12 under WSL2.
+- The kernel routine, `crc32c_mixed_avx512()`, is written and enabled on
+  Zen 5 only.
+- The series has not been sent to the mailing list yet.
+- It was developed with an AI coding assistant (Claude), which wrote the
+  prototype, the assembly, the harness and this README.
 
-| Length | Kernel today | Mixed (`v2s4r3d`) | Change |
-|-------:|-------------:|------------------:|-------:|
-| 512    | 38.9  | 51.3  | +32% |
-| 1024   | 72.2  | 74.7  | +3%  |
-| 2048   | 76.5  | 99.4  | +30% |
-| 4096   | 79.7  | 114.6 | +44% |
-| 8192   | 81.0  | 120.1 | +48% |
-| 16384  | 82.0  | 125.9 | +54% |
-| 65536  | 82.2  | 123.2 | +50% |
-| 1 MiB  | 82.9  | 116.7 | +41% |
+## Results
 
-"Kernel today" is the kernel's own `crc32_lsb_vpclmul_avx512()` from
-`crc-pclmul-template.S`, assembled unmodified from the kernel tree and called
-the way `crc32c_arch()` calls it on this CPU (512 bytes and up).
-
-Other measurements:
-
-- **clang 18** generates faster code for the prototype: 121.5 GB/s at 4096,
-  82.7 at 1024, 59.6 at 512.
-- **Misaligned buffer** (offset 4): 109.0 vs 80.2 at 4096.
-- **Lengths near 4 KiB** (3800 to 4160, including 4092 and 4095): 110 to 116,
-  no slow lengths.
-- **Independent calls** instead of chained: same picture from 1024 up. At 512
-  the kernel code is ahead, 63.4 vs 51.0.
-- **Chunk limit**: capping chunks at 4096 bytes gives 108 GB/s at 1 MiB instead
-  of 117, and shrinks the constants table to about 1 KiB.
-- **No vector lanes at all** (`v0s6r1d`, six `crc32q` chains merged with
-  PCLMULQDQ): 75.8 GB/s at 4096, about twice the kernel's `crc32c_x86_3way()`
-  at 38.7.
-
-## Kernel assembly version
-
-`lib/crc/x86/crc32c-mixed.S`, on branch `b4/crc32c-mixed` of the kernel tree,
-is the hand-written version of the best shape found here. When that file
-exists, `make` in this folder also builds it as `k-mixed`, through C glue that
-mirrors `crc32c_mixed()` in the kernel's `lib/crc/x86/crc32.h`, so the same
-test and benchmark cover it.
-
-In the kernel itself (`crc_kunit` benchmark, median of 5 boots under
-virtme-ng with `mitigations=off`, MB/s):
+In the kernel (`crc_kunit` benchmark, MB/s, best of 8 alternating boots under
+virtme-ng with `mitigations=off`, Ryzen 7 9800X3D):
 
 | Length | crc-next | With the patch | Change |
 |-------:|---------:|---------------:|-------:|
-| 512    | 38499 | 40953  | +6%  |
-| 1024   | 47788 | 65191  | +36% |
-| 3173   | 69128 | 101875 | +47% |
-| 4096   | 73004 | 109858 | +50% |
-| 16384  | 74426 | 121013 | +63% |
+| 512    | 39437 | 42545  | +8%  |
+| 1024   | 53646 | 67146  | +25% |
+| 3173   | 69262 | 98280  | +42% |
+| 4096   | 73542 | 112210 | +53% |
+| 16384  | 80961 | 122101 | +51% |
 
-`make ALT_S=path/to/other.S` adds a second copy of the assembly as `k-alt`
-for side-by-side comparison. Run `make clean` when adding or dropping it.
+In userspace, the same two assembly functions, GB/s at 4096 bytes:
+
+| CPU | Existing AVX-512 | New | Change |
+|---|---:|---:|---:|
+| AMD Ryzen 7 9800X3D (Zen 5) | 79.3 | 123.3 | +55% |
+| AMD EPYC 9V45 (Zen 5) | 65.6 | 103.0 | +57% |
+| AMD EPYC 9V74 (Zen 4) | 53.5 | 61.4 | +15% |
+| Intel Xeon 6975P-C (Granite Rapids) | 114.9 | 65.4 | −43% |
+| Intel Xeon 8370C (Ice Lake) | 45.2 | 56.5 | +25% |
+
+The cloud rows are single runs on GitHub's shared runners. They are why the
+routine is limited to Zen 5.
+
+On the 9800X3D, across every multiple of 8 from 512 to 4608 and a sample of
+other lengths up to 16384, the new routine is faster at every length, by a
+median of 50%. With a different random length on every call it is +52% for
+multiples of 8 and +40% for arbitrary lengths.
 
 ## Design
 
-One chunk is laid out as
+One piece of up to 4096 bytes is laid out as
 
-    [ V ][ lane 0 ][ lane 1 ] ... [ lane S-1 ][ F: 16 bytes ][ tail: len % 8 ]
+    [ V ][ lane 0 ][ lane 1 ][ lane 2 ][ lane 3 ][ F: 16 bytes ]
 
-- **V** is folded by K zmm accumulators, K 64-byte blocks per loop iteration.
-- Each **lane** is one `crc32q` dependency chain, R qwords per iteration.
-- Lane 0 takes the leftover qwords; its length only affects V's constants.
-- At the end, V's 4·K folding states and the CRCs of lanes 0..S-2 are each
-  multiplied by the power of x that moves them to F, XORed into F, and the
-  last lane's chain consumes F.
+- **V** is folded by two zmm registers, 128 bytes per loop iteration.
+- Each **lane** is one `crc32q` dependency chain, 3 qwords per iteration.
+- Lane 0 also takes up to 3 leftover qwords at its front.
+- At the end, V's eight folding states and the CRCs of lanes 0–2 are each
+  multiplied by the power of x that moves them to F and added into F, and
+  lane 3's chain finishes over F.
 
-The best shape found is K=2, S=4, R=3: 224 bytes per iteration.
+Every multiplier has the form M(d) = x^(64·d + 31) mod G for a qword
+distance d, so one 1 KiB table serves the loop and the merge. Stored in
+descending order, the eight entries one zmm register needs are adjacent and
+load with a single zero-extending load.
 
-Every constant has the form g(d) = x^(64·d + 31) mod P for a qword distance d,
-so one table serves the loop, the reduction and the merge. Stored in
-descending order, the eight entries one accumulator needs for the merge are
-consecutive, so they load with a single zero-extending load ("direct" merge,
-the `d` suffix). That removes one carryless-multiply stage from the end of
-every call and is worth 6–9% at 4096 with gcc.
+A C helper splits longer inputs into pieces and folds in the first
+`len % 8` bytes without branching on how many there are.
+
+The prototype in `crc32c_mixed.h` is the same design with the stream counts
+as parameters. It tried about twenty shapes; two zmm accumulators with four
+chains at 3 qwords per iteration was the best at 4 KiB on Zen 5.
 
 ## What this does not show
 
-- **One CPU only.** Nothing here says how the same code behaves on Zen 4,
-  Zen 3 or Intel. The kernel maintainer's stated concern is exactly that each
-  microarchitecture wants different lane counts.
-- **Userspace only.** The kernel pays for a kernel-FPU section around the
-  vector code. Both sides of the comparison use zmm registers, so that cost
-  should be the same for both, but it is not measured here.
-- **Not assembly.** A kernel version would be hand-written assembly with
-  build-time constants. clang beating gcc by 6% suggests there is room left.
-- **Measured in a VM** (WSL2). Baseline and prototype ran in the same
-  environment; absolute numbers on bare metal may differ.
-- **Run-to-run noise.** Absolute figures moved by up to about 7% between runs
-  (a later run gave 73.9 vs 106.5 at 4096). The ratio between kernel code and
-  prototype stayed put.
+- **No bare-metal numbers.** The machine runs Windows; everything here ran
+  under WSL2, and the in-kernel numbers in a nested guest.
+- **No mobile Zen 5 or Zen 5c.** Those have a 256-bit vector datapath and
+  may want a different balance.
+- **No real workload.** Only `crc_kunit` and microbenchmarks.
 
 ## Files
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `crc32c_mixed.h` | The prototype, parameterised by K, S, R and merge style |
-| `crc32c_mixed.c` | Startup generation of the constants |
-| `variants.h` | Which (K, S, R) combinations get built |
-| `impls.c` | Kernel baselines and prototype variants behind one interface |
+| `kernel/` | The kernel changes as patches against v7.4-rc2 |
+| `crc32c_mixed.h`, `crc32c_mixed.c` | Parameterised userspace prototype |
+| `variants.h` | Which prototype shapes get built |
+| `impls.c` | Kernel baselines, the kernel routine, and prototype variants behind one interface |
 | `test.c` | Correctness test against a bit-at-a-time reference |
-| `bench.c` | Throughput benchmark |
+| `bench.c` | Throughput benchmark: fixed or random lengths, chained or independent |
 | `shim/` | Stand-in headers so the kernel's `.S` files assemble in userspace |
-| `tools/kunit-crcbench.sh` | Runs the in-kernel `crc_kunit` benchmark under virtme-ng |
-| `tools/crc-kunit.config` | Kernel config fragment that enables that benchmark |
+| `tools/verify-layout.py` | Checks the routine's arithmetic for every legal length |
+| `tools/sweep.sh` | New versus current at every length in a range |
+| `tools/kunit-ab.sh` | A/B of the in-kernel benchmark between two kernel builds |
+| `tools/compare-codegen.sh` | Instruction-level diff of one function between two kernels |
+| `tools/align-experiment.sh` | Tests whether the existing routine is alignment-sensitive |
+| `tools/kunit-crcbench.sh`, `tools/crc-kunit.config` | In-kernel benchmark for one build |
+| `.github/workflows/ci.yml` | Compiler matrix and CPU sampling on GitHub Actions |
 
 ## Use
 
-    make                 # needs the kernel tree at ~/linux, or pass KDIR=
-    ./test               # every variant, 13001 inputs per chunk size
-    taskset -c 2 ./bench -f k-today -f v2s4r3d
-    ./bench -i -o 4 -m 4096 -l 4096   # independent calls, offset, chunk limit, length
+    tools/fetch-kernel.sh      # v7.4-rc2 plus the patches, into ./linux
+    make KDIR=$PWD/linux       # KDIR defaults to ~/linux
+    ./test 30000               # every length to 30000, plus random longer ones
+    taskset -c 2 ./bench -f k-today -f k-mixed
+    ./bench -i -r 512,4096,1   # independent calls, random arbitrary lengths
+    tools/sweep.sh 512 4608 8
 
-Variant names read `v<K>s<S>r<R>`, with a trailing `d` for the direct merge.
-`k-today`, `k-avx512`, `k-3way` and `one-chain` are the kernel's code paths.
+`k-today` is what the kernel does now on a CPU with good AVX-512, `k-mixed`
+is the new routine through glue equivalent to the kernel's, `k-3way` and
+`k-avx512` are the kernel's other paths, and `v<K>s<S>r<R>` are prototype
+shapes.
