@@ -5,6 +5,7 @@
  */
 #include "crc32c_mixed.h"
 #include "impls.h"
+#include "short.h"
 
 size_t crc32c_chunk_max = 32768;
 
@@ -106,6 +107,19 @@ kernel_one_chain(uint32_t crc, const uint8_t *p, size_t len)
 	return crc32c_one_chain(crc, p, len);
 }
 
+/* The short-path experiment from short.h, so that ./test covers it too. */
+static __attribute__((noinline)) uint32_t
+short_guarded(uint32_t crc, const uint8_t *p, size_t len)
+{
+	return crc32c_short_proposed(crc, p, len, 0);
+}
+
+static __attribute__((noinline)) uint32_t
+short_unguarded(uint32_t crc, const uint8_t *p, size_t len)
+{
+	return crc32c_short_proposed(crc, p, len, 1);
+}
+
 /* What crc32c_arch() does on a CPU with good AVX-512, minus the FPU section. */
 static __attribute__((noinline)) uint32_t
 kernel_today(uint32_t crc, const uint8_t *p, size_t len)
@@ -154,6 +168,8 @@ kernel_3way(uint32_t crc, const uint8_t *p, size_t len)
 
 const struct impl impls[] = {
 	{ "one-chain", kernel_one_chain, 1 },
+	{ "sh-guard", short_guarded, 1 },
+	{ "sh-nobr", short_unguarded, 1 },
 	{ "k-3way", kernel_3way, 1 },
 	{ "k-avx512", kernel_avx512, 1 },
 	{ "k-today", kernel_today, 1 },

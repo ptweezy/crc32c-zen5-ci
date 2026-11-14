@@ -8,7 +8,7 @@ CPU    ?= 2
 
 KX86 := $(KDIR)/lib/crc/x86
 OBJS := impls.o crc32c_mixed.o k_crc32_pclmul.o k_crc32c_3way.o
-HDRS := crc32c_mixed.h impls.h variants.h
+HDRS := crc32c_mixed.h impls.h variants.h short.h
 KASM := -c -Ishim -D__ASSEMBLY__ -Wa,--noexecstack
 
 # If the kernel tree has the assembly version of the mixed code, test it too.
@@ -18,7 +18,12 @@ IMPL_DEFS := -DHAVE_KERNEL_MIXED
 IMPL_DEPS := $(KX86)/crc32c-mixed-consts.h
 endif
 
-all: test bench
+all: test bench shortbench
+
+# The short-path benchmark needs only SSE4.2 and is built without
+# -march=native, so that it runs anywhere and resembles a kernel build.
+shortbench: shortbench.c short.h
+	$(CC) -O2 -msse4.2 -Wall -Wextra -o $@ $<
 
 k_crc32_pclmul.o: $(KX86)/crc32-pclmul.S $(KX86)/crc-pclmul-template.S
 	$(CC) $(KASM) -I$(KX86) -o $@ $<
@@ -57,6 +62,6 @@ run: bench
 	taskset -c $(CPU) ./bench
 
 clean:
-	rm -f *.o test bench
+	rm -f *.o test bench shortbench
 
 .PHONY: all check run clean

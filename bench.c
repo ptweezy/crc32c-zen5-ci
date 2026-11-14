@@ -52,7 +52,11 @@ static double run(crc_fn fn, const uint8_t *buf, size_t len, long iters, int ind
  * length-dependent branches inside each implementation can't be predicted
  * the way they are when one length is repeated.
  */
-#define NUM_RANDOM_LENS 4096
+/*
+ * Long enough that the branch predictor can't simply learn the sequence over
+ * the repetitions.
+ */
+#define NUM_RANDOM_LENS 65536
 
 static double run_random(crc_fn fn, const uint8_t *buf, const uint32_t *lens,
 			 int independent)
@@ -79,7 +83,7 @@ static double measure_random(crc_fn fn, const uint8_t *buf, const uint32_t *lens
 
 	for (int i = 0; i < NUM_RANDOM_LENS; i++)
 		total += lens[i];
-	for (int rep = 0; rep < 25; rep++) {
+	for (int rep = 0; rep < 9; rep++) {
 		double t = run_random(fn, buf, lens, independent);
 
 		if (t < best)
@@ -127,9 +131,16 @@ int main(int argc, char **argv)
 	int nrand = 0;
 	uint8_t *base;
 
+	int ns_per_call = 0;
+	const char *lens_file = NULL;
+
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-i"))
 			independent = 1;
+		else if (!strcmp(argv[i], "-n"))
+			ns_per_call = 1;	/* report ns per call, not GB/s */
+		else if (!strcmp(argv[i], "-L") && i + 1 < argc)
+			lens_file = argv[++i];	/* lengths, one per line, in order */
 		else if (!strcmp(argv[i], "-r") && i + 1 < argc && nrand < 16) {
 			/* -r LO,HI[,STEP]: random lengths, multiples of STEP */
 			rand_step[nrand] = 1;
@@ -154,7 +165,7 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (!nlens && !nrand) {
+	if (!nlens && !nrand && !lens_file) {
 		nlens = sizeof(default_lens) / sizeof(default_lens[0]);
 		memcpy(lens, default_lens, sizeof(default_lens));
 	}
@@ -164,8 +175,9 @@ int main(int argc, char **argv)
 	for (size_t i = 0; i < (4 << 20); i++)
 		base[i] = (uint8_t)(i * 2654435761u >> 13);
 
-	printf("mode=%s offset=%zu chunk_max=%zu   (GB/s)\n",
-	       independent ? "independent" : "chained", offset, crc32c_chunk_max);
+	printf("mode=%s offset=%zu chunk_max=%zu   (%s)\n",
+	       independent ? "independent" : "chained", offset, crc32c_chunk_max,
+	       ns_per_call ? "ns per call" : "GB/s");
 	printf("%8s", "len");
 	for (size_t ii = 0; ii < num_impls; ii++) {
 		int show = !nfilters;
@@ -183,9 +195,13 @@ int main(int argc, char **argv)
 
 			for (int f = 0; f < nfilters; f++)
 				show |= strstr(impls[ii].name, filters[f]) != NULL;
-			if (show)
-				printf(" %9.1f", measure(impls[ii].fn, base + offset,
-							 lens[li], independent));
+			if (show) {
+				double v = measure(impls[ii].fn, base + offset,
+						   lens[li], independent);
+
+				printf(ns_per_call ? " %9.2f" : " %9.1f",
+				       ns_per_call ? lens[li] / v : v);
+			}
 		}
 		printf("\n");
 		fflush(stdout);
@@ -195,6 +211,7 @@ int main(int argc, char **argv)
 		uint64_t s = 0x9e3779b97f4a7c15ull;
 		size_t span = (rand_hi[ri] - rand_lo[ri]) / rand_step[ri] + 1;
 		char label[64];
+		double mean = 0;
 
 		for (int i = 0; i < NUM_RANDOM_LENS; i++) {
 			s ^= s >> 12;
@@ -202,7 +219,9 @@ int main(int argc, char **argv)
 			s ^= s >> 27;
 			rlens[i] = (uint32_t)(rand_lo[ri] + rand_step[ri] *
 				((s * 0x2545f4914f6cdd1dull >> 33) % span));
+			mean += rlens[i];
 		}
+		mean /= NUM_RANDOM_LENS;
 		snprintf(label, sizeof(label), "%zu-%zu/%zu", rand_lo[ri],
 			 rand_hi[ri], rand_step[ri]);
 		printf("%16s", label);
@@ -211,12 +230,56 @@ int main(int argc, char **argv)
 
 			for (int f = 0; f < nfilters; f++)
 				show |= strstr(impls[ii].name, filters[f]) != NULL;
-			if (show)
-				printf(" %9.1f", measure_random(impls[ii].fn,
-						base + offset, rlens, independent));
+			if (show) {
+				double v = measure_random(impls[ii].fn, base + offset,
+							  rlens, independent);
+
+				printf(ns_per_call ? " %9.2f" : " %9.1f",
+				       ns_per_call ? mean / v : v);
+			}
 		}
 		printf("   (random lengths)\n");
 		fflush(stdout);
+	}
+	if (lens_file) {
+		/* A recorded sequence of lengths, replayed in its own order. */
+		static uint32_t flens[NUM_RANDOM_LENS];
+		FILE *f = fopen(lens_file, "r");
+		int n = 0;
+		double mean = 0;
+		unsigned int v;
+
+		if (!f) {
+			perror(lens_file);
+			return 1;
+		}
+		while (n < NUM_RANDOM_LENS && fscanf(f, "%u", &v) == 1)
+			flens[n++] = v;
+		fclose(f);
+		if (!n) {
+			fprintf(stderr, "%s: no lengths\n", lens_file);
+			return 1;
+		}
+		for (int i = n; i < NUM_RANDOM_LENS; i++)
+			flens[i] = flens[i % n];
+		for (int i = 0; i < NUM_RANDOM_LENS; i++)
+			mean += flens[i];
+		mean /= NUM_RANDOM_LENS;
+		printf("%16s", "from file");
+		for (size_t ii = 0; ii < num_impls; ii++) {
+			int show = !nfilters;
+
+			for (int fi = 0; fi < nfilters; fi++)
+				show |= strstr(impls[ii].name, filters[fi]) != NULL;
+			if (show) {
+				double g = measure_random(impls[ii].fn, base + offset,
+							  flens, independent);
+
+				printf(ns_per_call ? " %9.2f" : " %9.1f",
+				       ns_per_call ? mean / g : g);
+			}
+		}
+		printf("   (%d lengths read, mean %.1f)\n", n, mean);
 	}
 	return 0;
 }

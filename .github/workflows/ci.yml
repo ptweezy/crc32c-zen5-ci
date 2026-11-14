@@ -68,6 +68,25 @@ jobs:
           python3 tools/verify-layout.py
           ./test 20000 | grep -E 'k-|references|all tests|SOME|FAIL'
 
+  # The short-path experiment (short.h) needs only SSE4.2, so it runs on every
+  # runner CPU.
+  short:
+    name: short ${{ matrix.sample }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Machine
+        run: ./tools/machine.sh
+      - name: A source tree to take file names from
+        run: git clone -q --depth 1 --branch v7.4-rc2 https://github.com/torvalds/linux.git linux
+      - name: Short-path benchmark
+        run: ./tools/short-path.sh "$PWD/linux"
+
   # Sample whatever CPUs the runners happen to have: correctness, and the
   # kernel's assembly against the kernel's existing code.
   bench:
