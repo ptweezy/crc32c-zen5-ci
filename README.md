@@ -49,6 +49,34 @@ other lengths up to 16384, the new routine is faster at every length, by a
 median of 50%. With a different random length on every call it is +52% for
 multiples of 8 and +40% for arbitrary lengths.
 
+## A second, smaller change: the short path
+
+Separate from the Zen 5 routine, and applicable to every x86 CPU with CRC32
+instructions. Below 512 bytes the kernel finishes `crc32c()` with up to three
+tests on the low bits of the length. When lengths vary from call to call those
+tests mispredict, which for short inputs costs more than the CRC. The change
+in `kernel-tail/` folds the trailing bytes in with one CRC32 instruction
+instead; `short.h` and `shortbench.c` are the userspace form of it.
+
+Time per call for the lengths of the file names in the kernel source tree
+(mean 13 bytes), in directory-walk order:
+
+| CPU | Current | Proposed | Change |
+|---|---:|---:|---:|
+| AMD Ryzen 7 9800X3D (Zen 5) | 8.3 ns | 4.5 ns | −45% |
+| AMD EPYC 9V45 (Zen 5) | 10.7 ns | 6.7 ns | −37% |
+| AMD EPYC 9V74 (Zen 4) | 10.5 ns | 6.7 ns | −36% |
+| AMD EPYC 7763 (Zen 3) | 12.0 ns | 7.1 ns | −41% |
+| Intel Xeon 6975P-C (Granite Rapids) | 11.0 ns | 6.5 ns | −41% |
+
+In the kernel's own benchmark, with a varying-length case added by the first
+patch, `crc32c` goes from 1398 to 2531 MB/s for lengths 1–32 and from 7923 to
+11923 MB/s for lengths 1–256. Lengths that are a multiple of 8 are unchanged.
+Fixed lengths that leave exactly 1, 2 or 4 trailing bytes get about 3 cycles
+slower per call when each call's CRC feeds the next.
+
+`tools/short-path.sh` reproduces the userspace table on any x86-64 machine.
+
 ## Design
 
 One piece of up to 4096 bytes is laid out as
@@ -87,6 +115,10 @@ chains at 3 qwords per iteration was the best at 4 KiB on Zen 5.
 | Path | Purpose |
 |---|---|
 | `kernel/` | The kernel changes as patches against v7.4-rc2 |
+| `kernel-tail/` | The short-path change and the benchmark case it needs |
+| `short.h`, `shortbench.c` | The short-path change in userspace, with its own test and benchmark |
+| `tools/short-path.sh` | Runs that benchmark on fixed, random and file-name lengths |
+| `tools/kunit-i386.sh` | Builds a 32-bit kernel with the CRC tests and boots it in QEMU |
 | `crc32c_mixed.h`, `crc32c_mixed.c` | Parameterised userspace prototype |
 | `variants.h` | Which prototype shapes get built |
 | `impls.c` | Kernel baselines, the kernel routine, and prototype variants behind one interface |
