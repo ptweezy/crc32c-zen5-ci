@@ -1,6 +1,6 @@
 *.o
 /test
 /bench
+/shortbench
 /linux/
 /submission/
-/shortbench

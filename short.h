@@ -98,4 +98,48 @@ crc32c_short_proposed(uint32_t crc, const uint8_t *p, size_t len, const int NO_B
 	return (uint32_t)short_tail_tests(c, p, len);
 }
 
+/*
+ * The proposed code as it works out on 32-bit x86, where a long is 4 bytes:
+ * crc32l in the loop, and 1-3 bytes left over.  This is here only so that the
+ * 32-bit arithmetic can be tested on a 64-bit machine.
+ */
+static inline __attribute__((always_inline)) uint32_t
+crc32c_short_proposed_32bit(uint32_t crc, const uint8_t *p, size_t len)
+{
+	size_t num_longs = len / 4;
+
+	if (num_longs) {
+		const uint8_t *end = p + len;
+		const size_t rem = len % 4;
+
+		do {
+			uint32_t v;
+
+			memcpy(&v, p, 4);
+			crc = _mm_crc32_u32(crc, v);
+			p += 4;
+		} while (--num_longs);
+
+		if (rem) {
+			const unsigned int shift = 32 - 8 * rem;
+			uint32_t tail;
+
+			memcpy(&tail, end - 4, 4);
+			tail = ((tail >> shift) ^ crc) << shift;
+			crc = (crc >> (8 * rem)) ^ _mm_crc32_u32(0, tail);
+		}
+		return crc;
+	}
+	if (len & 2) {
+		uint16_t v;
+
+		memcpy(&v, p, 2);
+		crc = _mm_crc32_u16(crc, v);
+		p += 2;
+	}
+	if (len & 1)
+		crc = _mm_crc32_u8(crc, *p);
+	return crc;
+}
+
 #endif /* SHORT_H */

@@ -20,11 +20,15 @@ for i in $(seq 1 "$boots"); do
   done
 done
 
+# Print "variant length-or-range median best" per benchmark line.  Lengths are
+# either a number or a range like 1..32; ranges sort after the fixed lengths.
 summarise() {
   grep -hE '_benchmark: len=' "$out"/"$1"-*.txt \
-    | sed -E 's/^\[ *[0-9.]+\] +# ([a-z0-9_]+)_benchmark: len=([0-9]+): ([0-9]+) MB\/s.*/\1 \2 \3/' \
-    | grep -E "^($filter) " | sort -k1,1 -k2,2n -k3,3n \
-    | awk '{ k = $1 " " $2; if (k != p) { if (n) print p, a[int((n+1)/2)], a[n]; n = 0; p = k } a[++n] = $3 }
+    | sed -E 's/^\[ *[0-9.]+\] +# ([a-z0-9_]+)_benchmark: len=([0-9.]+): ([0-9]+) MB\/s.*/\1 \2 \3/' \
+    | grep -E "^($filter) " \
+    | awk '{ key = $2; if (index($2, "..")) { split($2, r, "."); key = 1000000000 + r[3] } print $1, key, $2, $3 }' \
+    | sort -k1,1 -k2,2n -k4,4n \
+    | awk '{ k = $1 " " $2 " " $3; if (k != p) { if (n) print p, a[int((n+1)/2)], a[n]; n = 0; p = k } a[++n] = $4 }
            END { if (n) print p, a[int((n+1)/2)], a[n] }'
 }
 
@@ -34,8 +38,8 @@ echo "boots each: $boots, cmdline: $cmdline"
 # Each length is timed for well under a millisecond per boot, so a single
 # interruption ruins a sample.  The best of several boots is the estimate of
 # what the code can do; the medians show how noisy the boots were.
-printf '%-10s %6s  %9s %9s %7s   %9s %9s\n' variant len A-best B-best change A-median B-median
-join -j1 <(summarise A | awk '{print $1"/"$2, $3, $4}' | sort) \
-         <(summarise B | awk '{print $1"/"$2, $3, $4}' | sort) \
+printf '%-10s %8s  %9s %9s %7s   %9s %9s\n' variant len A-best B-best change A-median B-median
+join -j1 <(summarise A | awk '{ print $1 "/" $2 "/" $3, $4, $5 }' | sort) \
+         <(summarise B | awk '{ print $1 "/" $2 "/" $3, $4, $5 }' | sort) \
   | tr '/' ' ' | sort -k1,1 -k2,2n \
-  | awk '{ printf "%-10s %6d  %9d %9d %+6.1f%%   %9d %9d\n", $1, $2, $4, $6, 100.0 * $6 / $4 - 100, $3, $5 }'
+  | awk '{ printf "%-10s %8s  %9d %9d %+6.1f%%   %9d %9d\n", $1, $3, $5, $7, 100.0 * $7 / $5 - 100, $4, $6 }'

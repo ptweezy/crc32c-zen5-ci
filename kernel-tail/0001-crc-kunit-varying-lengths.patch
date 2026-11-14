@@ -1,0 +1,61 @@
+diff --git a/lib/crc/tests/crc_kunit.c b/lib/crc/tests/crc_kunit.c
+index 9428cd913625..72c413851026 100644
+--- a/lib/crc/tests/crc_kunit.c
++++ b/lib/crc/tests/crc_kunit.c
+@@ -20,6 +20,7 @@
+ #define CRC_KUNIT_SEED			42
+ #define CRC_KUNIT_MAX_LEN		16384
+ #define CRC_KUNIT_NUM_TEST_ITERS	1000
++#define CRC_KUNIT_NUM_RANDOM_LENS	16384
+ 
+ static struct rnd_state rng;
+ static u8 *test_buffer;
+@@ -237,7 +238,9 @@ crc_benchmark(struct kunit *test,
+ 	static const size_t lens_to_test[] = {
+ 		1, 16, 64, 127, 128, 200, 256, 511, 512, 1024, 3173, 4096, 16384,
+ 	};
++	static const size_t max_random_lens_to_test[] = { 32, 256 };
+ 	size_t len, i, j, num_iters;
++	u16 *random_lens;
+ 	/*
+ 	 * The CRC value that this function computes in a series of calls to
+ 	 * crc_func is never actually used, so use volatile to ensure that the
+@@ -266,6 +269,38 @@ crc_benchmark(struct kunit *test,
+ 		kunit_info(test, "len=%zu: %llu MB/s\n",
+ 			   len, div64_u64((u64)len * num_iters * 1000, t));
+ 	}
++
++	/*
++	 * Repeating one length lets the CPU predict every length-dependent
++	 * branch in crc_func, which callers that pass varying lengths don't get
++	 * the benefit of.  So also benchmark with a different length on each
++	 * call.  The lengths are generated ahead of time to keep the random
++	 * number generator out of the measurement, and there are enough of them
++	 * that the branch predictor can't just learn the sequence.
++	 */
++	random_lens = kunit_kmalloc_array(test, CRC_KUNIT_NUM_RANDOM_LENS,
++					  sizeof(random_lens[0]), GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, random_lens);
++	for (i = 0; i < ARRAY_SIZE(max_random_lens_to_test); i++) {
++		size_t max_len = max_random_lens_to_test[i];
++		u64 total_len = 0;
++
++		for (j = 0; j < CRC_KUNIT_NUM_RANDOM_LENS; j++) {
++			random_lens[j] = 1 + rand32() % max_len;
++			total_len += random_lens[j];
++		}
++		num_iters = 8;
++		preempt_disable();
++		t = ktime_get_ns();
++		for (len = 0; len < num_iters; len++) {
++			for (j = 0; j < CRC_KUNIT_NUM_RANDOM_LENS; j++)
++				crc = crc_func(crc, test_buffer, random_lens[j]);
++		}
++		t = ktime_get_ns() - t;
++		preempt_enable();
++		kunit_info(test, "len=1..%zu: %llu MB/s\n", max_len,
++			   div64_u64(total_len * num_iters * 1000, t));
++	}
+ }
+ 
+ #if IS_REACHABLE(CONFIG_CRC7)

@@ -135,9 +135,13 @@ int main(int argc, char **argv)
 					return 1;
 				}
 			}
+			if (crc32c_short_proposed_32bit(init, p, len) != want) {
+				printf("FAIL: 32-bit form is wrong at len=%zu\n", len);
+				return 1;
+			}
 		}
 	}
-	printf("all three agree with a bit-at-a-time CRC for every length to 2100\n");
+	printf("all three, and the 32-bit form of the proposal, agree with a bit-at-a-time CRC for every length to 2100\n");
 	printf("%-24s %8s %8s %8s   %6s %6s\n", "ns per call", "current",
 	       "proposed", "no-br", "prop", "no-br");
 
